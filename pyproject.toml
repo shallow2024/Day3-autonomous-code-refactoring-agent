@@ -3,7 +3,7 @@ name = "autonomous-code-refactoring-agent"
 version = "1.0.0"
 description = "A guarded Python AST and subprocess feedback loop for iterative code repair"
 requires-python = ">=3.10"
-dependencies = ["groq>=0.9.0"]
+dependencies = ["openai>=1.40.0", "groq>=0.9.0"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0.0"]

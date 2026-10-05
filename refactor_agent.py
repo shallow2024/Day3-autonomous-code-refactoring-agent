@@ -1,7 +1,8 @@
 """A guarded autonomous Python refactoring loop.
 
-The agent validates a target with ast, runs it in a bounded subprocess, asks Groq
-for a complete corrected source file, and repeats for at most three attempts.
+The agent validates a target with ast, runs it in a bounded subprocess, asks a
+hosted coding model for a complete corrected source, and repeats for at most
+three attempts.
 """
 from __future__ import annotations
 
@@ -17,7 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_PROVIDER = "huggingface"
+DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct:featherless-ai"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+HF_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_ATTEMPTS = 3
 DEFAULT_TIMEOUT = 10
 MAX_SOURCE_CHARS = 120_000
@@ -41,7 +45,7 @@ class CompletionClient(Protocol):
 
 
 class GroqClient:
-    def __init__(self, model: str = DEFAULT_MODEL) -> None:
+    def __init__(self, model: str = GROQ_MODEL) -> None:
         try:
             from groq import Groq
         except ImportError as exc:
@@ -65,6 +69,34 @@ class GroqClient:
         content = response.choices[0].message.content
         if not content:
             raise AgentError("Groq returned an empty response.")
+        return content
+
+
+class HuggingFaceClient:
+    def __init__(self, model: str = DEFAULT_MODEL) -> None:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise AgentError("Install dependencies first: py -m pip install -r requirements.txt") from exc
+        token = os.getenv("HF_TOKEN")
+        if not token:
+            raise AgentError("HF_TOKEN is missing. Set it in PowerShell before using --provider huggingface.")
+        self._client = OpenAI(base_url=HF_BASE_URL, api_key=token)
+        self.model = model
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        response = self._client.chat.completions.create(
+            model=self.model,
+            temperature=0,
+            max_tokens=12_000,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        content = response.choices[0].message.content
+        if not content:
+            raise AgentError("Hugging Face returned an empty response.")
         return content
 
 
@@ -186,7 +218,7 @@ def refactor_file(
         if attempt == max_attempts:
             print("Stopped: maximum attempts reached; original target was not replaced.")
             return 1
-        print("Asking Groq for a complete corrected source file...")
+        print("Asking the selected model for a complete corrected source file...")
         candidate = extract_fixed_code(client.complete(SYSTEM_PROMPT, build_prompt(working.read_text(encoding="utf-8"), failure, attempt)))
         validate_source(candidate)
         working.write_text(candidate, encoding="utf-8")
@@ -195,11 +227,12 @@ def refactor_file(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Safely iterate on a Python file using Groq and subprocess feedback.")
+    parser = argparse.ArgumentParser(description="Safely iterate on a Python file using an AI provider and subprocess feedback.")
     parser.add_argument("target", type=Path, help="Path to the Python file to inspect")
     parser.add_argument("--apply", action="store_true", help="Replace the target only after a successful run; creates .bak first")
     parser.add_argument("--dry-run", action="store_true", help="Run and request fixes, but never replace the target (default)")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Groq model (default: {DEFAULT_MODEL})")
+    parser.add_argument("--provider", choices=("huggingface", "groq"), default=DEFAULT_PROVIDER, help="AI provider (default: huggingface)")
+    parser.add_argument("--model", help="Provider model; defaults to a Qwen coding model on Hugging Face")
     parser.add_argument("--max-attempts", type=int, default=DEFAULT_ATTEMPTS, choices=range(1, 4), metavar="1-3")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, choices=range(1, 61), metavar="SECONDS")
     return parser.parse_args()
@@ -208,7 +241,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        client = GroqClient(args.model)
+        if args.provider == "huggingface":
+            client = HuggingFaceClient(args.model or DEFAULT_MODEL)
+        else:
+            client = GroqClient(args.model or GROQ_MODEL)
         return refactor_file(args.target, client, max_attempts=args.max_attempts, timeout=args.timeout, apply=args.apply)
     except AgentError as exc:
         print(f"Error: {exc}", file=sys.stderr)
